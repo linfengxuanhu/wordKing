@@ -529,7 +529,7 @@ class _ActionTile extends StatelessWidget {
           onTap: onTap,
         ),
       );
-     ｝
+  }
 class QuizPage extends StatefulWidget {
   final List<WordEntry> words;
   final Map<String, WordProgress> progress;
