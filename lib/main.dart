@@ -485,6 +485,7 @@ class _StatCard extends StatelessWidget {
           ],
         ),
       );
+  }
 }
 
 class _ActionTile extends StatelessWidget {
