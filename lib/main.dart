@@ -14,6 +14,8 @@ void main() async {
 const ink = Color(0xFF243447);
 const accent = Color(0xFF287D78);
 
+// ============================== 数据模型 ==============================
+
 class WordEntry {
   final String level, word, meaning, example, ipa;
 
@@ -74,6 +76,13 @@ class WordProgress {
       };
 }
 
+int dayKeyOf([DateTime? d]) {
+  final x = d ?? DateTime.now();
+  return x.year * 10000 + x.month * 100 + x.day;
+}
+
+// ============================== App ==============================
+
 class WenquxingApp extends StatelessWidget {
   const WenquxingApp({super.key});
 
@@ -100,6 +109,8 @@ class WenquxingApp extends StatelessWidget {
       );
 }
 
+// ============================== 首页 ==============================
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -115,6 +126,10 @@ class _HomePageState extends State<HomePage> {
   int dailyGoal = 20;
   String level = '全部';
   bool loading = true;
+
+  // 今日新学词数（仅统计当天首次学习的词），按日期存储
+  int todayNewCount = 0;
+  int todayKey = 0;
 
   @override
   void initState() {
@@ -144,6 +159,17 @@ class _HomePageState extends State<HomePage> {
       learned = (prefs.getStringList('learned_v1') ?? []).toSet();
       wrongs = (prefs.getStringList('wrongs_v1') ?? []).toSet();
       dailyGoal = prefs.getInt('daily_goal') ?? 20;
+
+      // 恢复今日新词计数
+      final storedKey = prefs.getInt('today_new_key') ?? 0;
+      final storedCount = prefs.getInt('today_new_count') ?? 0;
+      final currentKey = dayKeyOf();
+      if (storedKey == currentKey) {
+        todayNewCount = storedCount;
+      } else {
+        todayNewCount = 0;
+      }
+      todayKey = currentKey;
     } catch (e) {
       debugPrint('加载数据失败：$e');
     }
@@ -161,17 +187,21 @@ class _HomePageState extends State<HomePage> {
     await prefs.setStringList('learned_v1', learned.toList());
     await prefs.setStringList('wrongs_v1', wrongs.toList());
     await prefs.setInt('daily_goal', dailyGoal);
+    await prefs.setInt('today_new_key', todayKey);
+    await prefs.setInt('today_new_count', todayNewCount);
   }
 
-  int _dayKey([DateTime? d]) {
-    final x = d ?? DateTime.now();
-    return x.year * 10000 + x.month * 100 + x.day;
+  /// 由 QuizPage 回调：某个词今日首次学习时更新计数
+  void _notifyFirstLearnedToday() {
+    final currentKey = dayKeyOf();
+    if (todayKey != currentKey) {
+      todayKey = currentKey;
+      todayNewCount = 0;
+    }
+    todayNewCount++;
   }
 
-  int get todayCount {
-    final key = _dayKey();
-    return learned.where((w) => (progress[w]?.lastAt ?? 0) == key).length;
-  }
+  int get todayCount => todayNewCount;
 
   List<WordEntry> get availableWords => words
       .where((w) => level == '全部' || w.level == level)
@@ -219,6 +249,7 @@ class _HomePageState extends State<HomePage> {
           learned: learned,
           wrongs: wrongs,
           onChanged: _save,
+          onFirstLearnedToday: _notifyFirstLearnedToday,
           onFinished: () {
             if (mounted) setState(() {});
           },
@@ -238,6 +269,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     final due = dueWords.length;
+    final progressRatio = dailyGoal == 0
+        ? 0.0
+        : (todayCount / dailyGoal).clamp(0.0, 1.0).toDouble();
 
     return Scaffold(
       appBar: AppBar(
@@ -296,7 +330,7 @@ class _HomePageState extends State<HomePage> {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(20),
                   child: LinearProgressIndicator(
-                    value: (todayCount / dailyGoal).clamp(0.0, 1.0),
+                    value: progressRatio,
                     minHeight: 8,
                     backgroundColor: Colors.white24,
                     color: Colors.white,
@@ -406,6 +440,7 @@ class _HomePageState extends State<HomePage> {
                     learned: learned,
                     wrongs: wrongs,
                     onChanged: _save,
+                    onFirstLearnedToday: _notifyFirstLearnedToday,
                     onFinished: () {
                       if (mounted) setState(() {});
                     },
@@ -447,6 +482,8 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+// ============================== 小组件 ==============================
+
 class _StatCard extends StatelessWidget {
   final String label;
   final String value;
@@ -485,7 +522,6 @@ class _StatCard extends StatelessWidget {
           ],
         ),
       );
-  }
 }
 
 class _ActionTile extends StatelessWidget {
@@ -505,6 +541,7 @@ class _ActionTile extends StatelessWidget {
   Widget build(BuildContext context) => Card(
         color: Colors.white,
         elevation: 0,
+        margin: EdgeInsets.zero,
         child: ListTile(
           contentPadding:
               const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
@@ -530,12 +567,16 @@ class _ActionTile extends StatelessWidget {
           onTap: onTap,
         ),
       );
-  }
+}
+
+// ============================== 答题页 ==============================
+
 class QuizPage extends StatefulWidget {
   final List<WordEntry> words;
   final Map<String, WordProgress> progress;
   final Set<String> learned, wrongs;
   final Future<void> Function() onChanged;
+  final VoidCallback onFirstLearnedToday; // 首次学习当天记录
   final VoidCallback onFinished;
 
   const QuizPage({
@@ -545,6 +586,7 @@ class QuizPage extends StatefulWidget {
     required this.learned,
     required this.wrongs,
     required this.onChanged,
+    required this.onFirstLearnedToday,
     required this.onFinished,
   });
 
@@ -567,6 +609,8 @@ class _QuizPageState extends State<QuizPage> {
   String feedback = '';
   int right = 0;
   int answered = 0;
+
+  bool _handlingInput = false;
 
   @override
   void initState() {
@@ -625,28 +669,37 @@ class _QuizPageState extends State<QuizPage> {
   }
 
   void _onLetterChanged(int pos, String value) {
-    if (checked) return;
+    if (checked || _handlingInput) return;
+    _handlingInput = true;
 
-    final normalized = value.toLowerCase();
+    try {
+      final normalized = value.toLowerCase();
 
-    if (normalized.isNotEmpty) {
-      final letter = normalized.characters.last;
+      if (normalized.isNotEmpty) {
+        final letter = normalized.characters.last;
+        _controllers[pos]!.value = TextEditingValue(
+          text: letter,
+          selection: TextSelection.collapsed(offset: letter.length),
+        );
 
-      _controllers[pos]!.value = TextEditingValue(
-        text: letter,
-        selection: TextSelection.collapsed(offset: letter.length),
-      );
-
-      final hiddenIndex = hidden.indexOf(pos);
-
-      if (hiddenIndex >= 0 && hiddenIndex < hidden.length - 1) {
-        _focusNodes[hidden[hiddenIndex + 1]]?.requestFocus();
+        final hiddenIndex = hidden.indexOf(pos);
+        if (hiddenIndex >= 0 && hiddenIndex < hidden.length - 1) {
+          _focusNodes[hidden[hiddenIndex + 1]]?.requestFocus();
+        } else {
+          _focusNodes[pos]?.unfocus();
+        }
       } else {
-        _focusNodes[pos]?.unfocus();
+        // 删除后自动回到上一个空格
+        final hiddenIndex = hidden.indexOf(pos);
+        if (hiddenIndex > 0) {
+          _focusNodes[hidden[hiddenIndex - 1]]?.requestFocus();
+        }
       }
-    }
 
-    setState(() {});
+      setState(() {});
+    } finally {
+      _handlingInput = false;
+    }
   }
 
   void _submit() {
@@ -659,6 +712,7 @@ class _QuizPageState extends State<QuizPage> {
     final expected = hidden.map((i) => current.word[i]).join();
     correct = answer == expected;
 
+    final isFirstLearn = !widget.learned.contains(current.word);
     final p = widget.progress.putIfAbsent(
       current.word,
       () => WordProgress(),
@@ -667,7 +721,7 @@ class _QuizPageState extends State<QuizPage> {
     final now = DateTime.now();
 
     p.seen++;
-    p.lastAt = now.year * 10000 + now.month * 100 + now.day;
+    p.lastAt = dayKeyOf(now);
     answered++;
 
     if (correct) {
@@ -690,12 +744,16 @@ class _QuizPageState extends State<QuizPage> {
       widget.learned.add(current.word);
       widget.wrongs.remove(current.word);
       feedback = '答对了！恭喜过关 🎉';
+
+      // 首次学习且今日首次 → 计入今日新词进度
+      if (isFirstLearn) {
+        widget.onFirstLearnedToday();
+      }
     } else {
       p.wrong++;
       p.streak = 0;
       p.intervalDays = 0;
-      p.dueAt =
-          now.add(const Duration(hours: 8)).millisecondsSinceEpoch;
+      p.dueAt = now.add(const Duration(hours: 8)).millisecondsSinceEpoch;
 
       widget.wrongs.add(current.word);
       feedback = '再接再厉，正确答案是 ${current.word}';
@@ -743,20 +801,26 @@ class _QuizPageState extends State<QuizPage> {
   }
 
   Widget _buildWord() {
+    // 输入框宽度随单词长度自适应，避免长单词挤爆
+    final n = current.word.length;
+    final fixedWidth = n > 14 ? 22.0 : 30.0;
+    final inputWidth = n > 14 ? 26.0 : 34.0;
+    final fontSize = n > 14 ? 26.0 : 32.0;
+
     return Wrap(
       alignment: WrapAlignment.center,
       crossAxisAlignment: WrapCrossAlignment.center,
       spacing: 1,
-      children: List.generate(current.word.length, (i) {
+      children: List.generate(n, (i) {
         if (!hidden.contains(i)) {
           return SizedBox(
-            width: 30,
+            width: fixedWidth,
             height: 58,
             child: Center(
               child: Text(
                 current.word[i],
-                style: const TextStyle(
-                  fontSize: 32,
+                style: TextStyle(
+                  fontSize: fontSize,
                   fontWeight: FontWeight.w800,
                   color: ink,
                 ),
@@ -766,7 +830,7 @@ class _QuizPageState extends State<QuizPage> {
         }
 
         return SizedBox(
-          width: 34,
+          width: inputWidth,
           height: 58,
           child: TextField(
             controller: _controllers[i],
@@ -780,8 +844,8 @@ class _QuizPageState extends State<QuizPage> {
               FilteringTextInputFormatter.allow(RegExp('[a-zA-Z]')),
               LengthLimitingTextInputFormatter(1),
             ],
-            style: const TextStyle(
-              fontSize: 30,
+            style: TextStyle(
+              fontSize: fontSize - 2,
               fontWeight: FontWeight.w800,
               color: accent,
             ),
@@ -823,6 +887,10 @@ class _QuizPageState extends State<QuizPage> {
       );
     }
 
+    final ipaText = current.ipa.trim();
+    final meaningText = current.meaning.trim();
+    final exampleText = current.example.trim();
+
     return Scaffold(
       appBar: AppBar(
         title: Text('单词练习  ${index + 1}/${queue.length}'),
@@ -859,20 +927,22 @@ class _QuizPageState extends State<QuizPage> {
           const SizedBox(height: 22),
           _buildWord(),
           const SizedBox(height: 28),
-          Text(
-            current.meaning,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 20),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            '音标  /${current.ipa}/',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.black54,
-              fontSize: 16,
+          if (meaningText.isNotEmpty)
+            Text(
+              meaningText,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 20),
             ),
-          ),
+          const SizedBox(height: 10),
+          if (ipaText.isNotEmpty)
+            Text(
+              '音标  /$ipaText/',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.black54,
+                fontSize: 16,
+              ),
+            ),
           const SizedBox(height: 26),
           if (!checked)
             FilledButton(
@@ -904,15 +974,23 @@ class _QuizPageState extends State<QuizPage> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  Text('${current.word}  /${current.ipa}/'),
-                  const SizedBox(height: 4),
-                  Text(current.meaning),
-                  const SizedBox(height: 8),
-                  const Text(
-                    '例句',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  Text(
+                    ipaText.isEmpty
+                        ? current.word
+                        : '${current.word}  /$ipaText/',
                   ),
-                  Text(current.example),
+                  if (meaningText.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(meaningText),
+                  ],
+                  if (exampleText.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      '例句',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Text(exampleText),
+                  ],
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -945,7 +1023,7 @@ class _QuizPageState extends State<QuizPage> {
             ),
           const SizedBox(height: 20),
           Text(
-            '小提示：直接在单词横线处输入缺失字母，输入后会自动跳到下一个空位。',
+            '小提示：直接在单词横线处输入缺失字母，输入后会自动跳到下一个空位；删除字母会自动回到上一个空位。',
             style: TextStyle(
               color: Colors.grey.shade600,
               fontSize: 12,
@@ -956,6 +1034,8 @@ class _QuizPageState extends State<QuizPage> {
     );
   }
 }
+
+// ============================== 词库页 ==============================
 
 class WordListPage extends StatelessWidget {
   final List<WordEntry> words;
@@ -976,6 +1056,12 @@ class WordListPage extends StatelessWidget {
           itemBuilder: (ctx, i) {
             final w = words[i];
             final p = progress[w.word];
+            final ipa = w.ipa.trim();
+            final parts = [
+              if (w.meaning.trim().isNotEmpty) w.meaning,
+              if (ipa.isNotEmpty) '/$ipa/',
+              if (w.example.trim().isNotEmpty) w.example,
+            ];
 
             return ListTile(
               title: Text(
@@ -983,12 +1069,15 @@ class WordListPage extends StatelessWidget {
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               subtitle: Text(
-                '${w.meaning}\n/${w.ipa}/ · ${w.example}',
+                parts.join(' · '),
                 maxLines: 3,
+                overflow: TextOverflow.ellipsis,
               ),
               isThreeLine: true,
               trailing: Text(
-                p == null ? '未学' : '错 ${p.wrong} 次',
+                p == null
+                    ? '未学'
+                    : (p.wrong > 0 ? '错 ${p.wrong} 次' : '已掌握'),
                 style: const TextStyle(fontSize: 12, color: accent),
               ),
             );
@@ -996,6 +1085,8 @@ class WordListPage extends StatelessWidget {
         ),
       );
 }
+
+// ============================== 设置页 ==============================
 
 class SettingsPage extends StatefulWidget {
   final int initialGoal;
@@ -1065,10 +1156,9 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             const SizedBox(height: 8),
             const Text(
-              '答对后复习间隔依次延长；连续答对后进一步拉长间隔。答错则重置熟练度，并在约 8 小时后重新安排。该规则是第一版的简化间隔复习算法，并非严格复刻某一型号文曲星的内部算法。',
+              '答对后复习间隔依次延长：1 天 → 3 天 → 7 天，之后每次翻倍（上限 180 天）。答错则重置熟练度，并在约 8 小时后重新安排。该规则是第一版的简化间隔复习算法，并非严格复刻某一型号文曲星的内部算法。',
             ),
-                    ],
+          ],
         ),
       );
-  }
 }
