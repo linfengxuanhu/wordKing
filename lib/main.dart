@@ -1067,7 +1067,8 @@ class _SettingsPageState extends State<SettingsPage> {
             const Text(
               '答对后复习间隔依次延长；连续答对后进一步拉长间隔。答错则重置熟练度，并在约 8 小时后重新安排。该规则是第一版的简化间隔复习算法，并非严格复刻某一型号文曲星的内部算法。',
             ),
-          ],
+                    ],
         ),
       );
+  }
 }
